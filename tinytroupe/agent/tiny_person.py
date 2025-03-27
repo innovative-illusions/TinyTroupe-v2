@@ -784,11 +784,24 @@ class TinyPerson(JsonSerializableRegistry):
         logger.debug(f"[{self.name}] Sending messages to OpenAI API")
         logger.debug(f"[{self.name}] Last interaction: {messages[-1]}")
 
-        next_message = openai_utils.client().send_message(messages, response_format=CognitiveActionModel)
+        # Removed response_format=CognitiveActionModel as it often fails with local models/LM Studio
+        next_message = openai_utils.client().send_message(messages)
 
         logger.debug(f"[{self.name}] Received message: {next_message}")
 
-        return next_message["role"], utils.extract_json(next_message["content"])
+        if next_message is None or "content" not in next_message:
+             logger.error(f"[{self.name}] Failed to get valid response from LLM. Received: {next_message}")
+             # Return a default or raise a specific error might be better long-term
+             return "assistant", {"cognitive_state": "Error processing response", "action": {"type": "NoOp", "details": "LLM response was invalid or None"}}
+
+        # Attempt to extract JSON from the content string
+        try:
+            extracted_json = utils.extract_json(next_message["content"])
+            return next_message.get("role", "assistant"), extracted_json
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"[{self.name}] Failed to extract JSON from LLM response content: {e}. Content was: {next_message['content']}")
+            # Return a default or raise error
+            return "assistant", {"cognitive_state": "Error parsing response", "action": {"type": "NoOp", "details": "LLM response was not valid JSON"}}
 
     ###########################################################
     # Internal cognitive state changes

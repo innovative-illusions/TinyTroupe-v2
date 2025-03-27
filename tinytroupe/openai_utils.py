@@ -344,8 +344,16 @@ class OpenAIClient:
     def _setup_from_config(self):
         """
         Sets up the OpenAI API configurations for this client.
+        Reads API key and base URL from environment variables (TINYtroupe_OPENAI_API_KEY, TINYtroupe_OPENAI_BASE_URL)
+        or falls back to the config file ([OpenAI] section).
         """
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        api_key = os.getenv("TINYtroupe_OPENAI_API_KEY") or config["OpenAI"].get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("TINYtroupe_OPENAI_BASE_URL") or config["OpenAI"].get("OPENAI_BASE_URL")
+
+        if not api_key:
+            logger.warning("OpenAI API key not found in environment variables (TINYtroupe_OPENAI_API_KEY, OPENAI_API_KEY) or config file. API calls may fail.")
+
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     def send_message(self,
                     current_messages,
@@ -424,12 +432,9 @@ class OpenAIClient:
         while i < max_attempts:
             try:
                 i += 1
-
-                try:
-                    logger.debug(f"Sending messages to OpenAI API. Token count={self._count_tokens(current_messages, model)}.")
-                except NotImplementedError:
-                    logger.debug(f"Token count not implemented for model {model}.")
                     
+                # Removed token counting logic
+                logger.debug(f"Sending messages to OpenAI API for model {model}.")
                 start_time = time.monotonic()
                 logger.debug(f"Calling model with client class {self.__class__.__name__}.")
 
@@ -440,10 +445,7 @@ class OpenAIClient:
                 if self.cache_api_calls and (cache_key in self.api_cache):
                     response = self.api_cache[cache_key]
                 else:
-                    if waiting_time > 0:
-                        logger.info(f"Waiting {waiting_time} seconds before next API request (to avoid throttling)...")
-                        time.sleep(waiting_time)
-                    
+                    # Removed preemptive time.sleep(waiting_time) - backoff logic handles delays on actual errors.
                     response = self._raw_model_call(model, chat_api_params)
                     if self.cache_api_calls:
                         self.api_cache[cache_key] = response
@@ -513,59 +515,7 @@ class OpenAIClient:
         """
         return response.choices[0].message.to_dict()
 
-    def _count_tokens(self, messages: list, model: str):
-        """
-        Count the number of OpenAI tokens in a list of messages using tiktoken.
-
-        Adapted from https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
-
-        Args:
-        messages (list): A list of dictionaries representing the conversation history.
-        model (str): The name of the model to use for encoding the string.
-        """
-        try:
-            try:
-                encoding = tiktoken.encoding_for_model(model)
-            except KeyError:
-                logger.debug("Token count: model not found. Using cl100k_base encoding.")
-                encoding = tiktoken.get_encoding("cl100k_base")
-            if model in {
-                "gpt-3.5-turbo-0613",
-                "gpt-3.5-turbo-16k-0613",
-                "gpt-4-0314",
-                "gpt-4-32k-0314",
-                "gpt-4-0613",
-                "gpt-4-32k-0613",
-                }:
-                tokens_per_message = 3
-                tokens_per_name = 1
-            elif model == "gpt-3.5-turbo-0301":
-                tokens_per_message = 4  # every message follows <|start|>{role/name}\n{content}<|end|>\n
-                tokens_per_name = -1  # if there's a name, the role is omitted
-            elif "gpt-3.5-turbo" in model:
-                logger.debug("Token count: gpt-3.5-turbo may update over time. Returning num tokens assuming gpt-3.5-turbo-0613.")
-                return self._count_tokens(messages, model="gpt-3.5-turbo-0613")
-            elif ("gpt-4" in model) or ("ppo" in model):
-                logger.debug("Token count: gpt-4 may update over time. Returning num tokens assuming gpt-4-0613.")
-                return self._count_tokens(messages, model="gpt-4-0613")
-            else:
-                raise NotImplementedError(
-                    f"""num_tokens_from_messages() is not implemented for model {model}. See https://github.com/openai/openai-python/blob/main/chatml.md for information on how messages are converted to tokens."""
-                )
-            num_tokens = 0
-            for message in messages:
-                num_tokens += tokens_per_message
-                for key, value in message.items():
-                    num_tokens += len(encoding.encode(value))
-                    if key == "name":
-                        num_tokens += tokens_per_name
-            num_tokens += 3  # every reply is primed with <|start|>assistant<|message|>
-            return num_tokens
-        
-        except Exception as e:
-            logger.error(f"Error counting tokens: {e}")
-            return None
-
+    # Removed _count_tokens method as it's no longer needed and caused issues with custom models.
     def _save_cache(self):
         """
         Saves the API cache to disk. We use pickle to do that because some obj
@@ -623,13 +573,42 @@ class AzureClient(OpenAIClient):
     
     def _setup_from_config(self):
         """
-        Sets up the Azure OpenAI Service API configurations for this client,
-        including the API endpoint and key.
+        Sets up the Azure OpenAI API configurations for this client.
+        Reads settings from environment variables (TINYtroupe_AZURE_OPENAI_API_KEY, TINYtroupe_AZURE_OPENAI_ENDPOINT, TINYtroupe_AZURE_API_VERSION)
+        or falls back to the config file ([OpenAI] section) or older environment variables.
         """
-        self.client = AzureOpenAI(azure_endpoint= os.getenv("AZURE_OPENAI_ENDPOINT"),
-                                  api_version = config["OpenAI"]["AZURE_API_VERSION"],
-                                  api_key = os.getenv("AZURE_OPENAI_KEY"))
-    
+        api_key = (
+            os.getenv("TINYtroupe_AZURE_OPENAI_API_KEY")
+            or config["OpenAI"].get("AZURE_OPENAI_API_KEY") # Check config first for Azure key
+            or os.getenv("AZURE_OPENAI_API_KEY") # Older env var
+            or os.getenv("AZURE_OPENAI_KEY") # Even older env var? Check this name
+        )
+        azure_endpoint = (
+            os.getenv("TINYtroupe_AZURE_OPENAI_ENDPOINT")
+            or config["OpenAI"].get("AZURE_OPENAI_ENDPOINT")
+            or os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+        # Ensure correct key access for api_version
+        api_version = (
+            os.getenv("TINYtroupe_AZURE_API_VERSION")
+            or config["OpenAI"].get("AZURE_API_VERSION") # Check config first
+        )
+
+        if not api_key:
+            logger.warning("Azure OpenAI API key not found in environment variables (TINYtroupe_AZURE_OPENAI_API_KEY, AZURE_OPENAI_API_KEY, AZURE_OPENAI_KEY) or config file. API calls may fail.")
+        if not azure_endpoint:
+            logger.warning("Azure OpenAI Endpoint not found in environment variables (TINYtroupe_AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_ENDPOINT) or config file. API calls may fail.")
+        if not api_version:
+            # Defaulting AZURE_API_VERSION if not found, as it might be optional depending on Azure setup
+            api_version = config["OpenAI"].get("AZURE_API_VERSION", "2023-05-15") # Provide a default from original config
+            logger.info(f"Azure API Version not found, using default: {api_version}")
+
+
+        self.client = AzureOpenAI(
+            api_key=api_key,
+            api_version=api_version,
+            azure_endpoint=azure_endpoint
+        )
 
 ###########################################################################
 # Exceptions
